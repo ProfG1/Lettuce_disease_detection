@@ -1,53 +1,88 @@
 import numpy as np
 import cv2
 from tensorflow.keras.models import load_model
-import matplotlib.pyplot as plt
+import serial
+import time
+import os
+
+# Initialize serial communication with Arduino
+arduino = serial.Serial('COM3', 115200, timeout=1)  # Adjust COM port as necessary
 
 # Load the pre-trained model
 model = load_model('lettuce_disease_classifier.h5')
-print("Model input shape:", model.input_shape)  # Check the expected input shape
+print("Model input shape:", model.input_shape)
 
-# Define a function to preprocess the image
+# Function to capture image from webcam
+def capture_image(sample_name):
+    cap = cv2.VideoCapture(1)
+
+    if not cap.isOpened():
+        print(f"Error: Could not open webcam for {sample_name}.")
+        return None
+
+    ret, frame = cap.read()
+
+    if ret:
+        image_path = f'{sample_name}.jpg'
+        cv2.imwrite(image_path, frame)
+        print(f"Image saved as {image_path}")
+    else:
+        print(f"Failed to capture {sample_name}.")
+        image_path = None
+
+    cap.release()
+    return image_path
+
+# Function to preprocess the image
 def preprocess_image(image_path):
-    # Load the image
     img = cv2.imread(image_path)
-    # Resize the image to the input size expected by the model
-    img = cv2.resize(img, (150, 150))  # Adjust this size based on your model's input shape
-    # Convert image to float32 and normalize
+    img = cv2.resize(img, (150, 150))  # Adjust based on model input
     img = img.astype('float32') / 255.0
-    # Expand dimensions to match model input shape
     img = np.expand_dims(img, axis=0)  # Shape becomes (1, 150, 150, 3)
     return img
 
-# Define a function to make predictions
+# Function to make predictions
 def predict_disease(image_path):
-    # Preprocess the image
     processed_img = preprocess_image(image_path)
-    print("Processed image shape:", processed_img.shape)  # Check the processed image shape
-    # Make a prediction
     predictions = model.predict(processed_img)
-    # Get the predicted class
     predicted_class = np.argmax(predictions, axis=1)
     return predicted_class, predictions
 
-# Define a main function to run the detection
-def main():
-    image_path = 'captured_image.jpg'  # Use the image captured from the webcam
-    predicted_class, predictions = predict_disease(image_path)
+# Function to send data to Arduino
+def send_to_arduino(data):
+    arduino.write(data.encode())
+    time.sleep(1)
 
-    # Mapping classes to disease names (adjust based on your model's training)
-    class_labels = {0: 'Bacterial', 1: 'Fungal', 2: 'Viral', 3: 'Healthy', 4: 'Other', 5: 'Disease F'}  # Add as many diseases as your model has
+# Main loop to capture and classify images
+def main_loop():
+    while True:
+        key = input("Press 's' to start capturing images: ")
 
-    # Print the prediction results
-    print(f"Predicted Class: {class_labels[predicted_class[0]]}")
-    print(f"Prediction Probabilities: {predictions}")
+        if key == 's':
+            print("Capturing sample A...")
+            sample_a_path = capture_image('sample_a')
 
-    # Display the input image
-    img = cv2.imread(image_path)
-    plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    plt.title(f"Predicted: {class_labels[predicted_class[0]]}")
-    plt.axis('off')
-    plt.show()
+            if sample_a_path:
+                predicted_class_a, predictions_a = predict_disease(sample_a_path)
+                send_to_arduino("first_done")  # Notify Arduino that first capture is done
+                print("Waiting for Arduino signal to capture second image...")
+
+                # Wait for Arduino signal to take second picture
+                while True:
+                    arduino_signal = arduino.readline().decode().strip()
+                    if arduino_signal == "capture_second":
+                        print("Capturing sample B...")
+                        sample_b_path = capture_image('sample_b')
+                        break
+
+                if sample_b_path:
+                    predicted_class_b, predictions_b = predict_disease(sample_b_path)
+
+                    # Send class labels of both samples to Arduino
+                    send_to_arduino(f"A:{predicted_class_a[0]}, B:{predicted_class_b[0]}")
+                    print(f"Sample A class: {predicted_class_a[0]}, Sample B class: {predicted_class_b[0]}")
+
+            print("Waiting for next 's' key press...")
 
 if __name__ == "__main__":
-    main()
+    main_loop()
